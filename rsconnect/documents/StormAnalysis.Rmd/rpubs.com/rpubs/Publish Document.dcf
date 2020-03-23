@@ -1,0 +1,10 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/588063/1541fbc699404581acd76e4a5ab62fa2
+bundleId: https://api.rpubs.com/api/v1/document/588063/1541fbc699404581acd76e4a5ab62fa2
+url: http://rpubs.com/Teto/588063
+when: 1585001468.62465

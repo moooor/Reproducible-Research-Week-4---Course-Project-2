@@ -1,0 +1,191 @@
+---
+title: "Reproducible Research Course Project 2"
+author: "Tamer Salem"
+date: "3/23/2020"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+options(scipen=999)
+knitr::opts_chunk$set(fig.path='figure/fig', echo=TRUE)
+```
+# Consequences of climate events on US population and properties between 1950 and 2011 based on U.S. National Oceanic and Atmospheric Administration (NOAA) storm database.
+
+## Synopsis
+(this paper is based on a Coursera Data Science - Reproducible research peer graded assignment).
+The goal of this study is to explore the effects of climate events on US population health as well as the economic impacts of such events (damage to properties), in order to determine which type of events have been the most impacting in each case.
+Such study should be able to inform administration actions toward preventing or minimising the effects of such natural events.
+
+The source code for this analysis is available on [GithUb](https://github.com/moooor/Reproducible_Research_Week_4_Course_Project_2).
+
+## Data processing
+NOAA source data is available [here](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2).
+The documentation explaining the fields is availalble [here](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf), along with an [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf).
+
+### Downloading data from the web
+```{r init}
+suppressWarnings(suppressMessages(library(R.utils)))
+projectData <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+bunzip2File <- "./StormData.csv.bz2"
+if (!file.exists(bunzip2File)) {
+    download.file(projectData, bunzip2File)
+    message("Source File downloaded")
+} else {
+    message("Source File already present in this folder.")
+}
+if (file.exists(bunzip2File)) {
+    bunzip2(bunzip2File, ext="bz2", FUN=bzfile, skip=TRUE, remove=FALSE)
+    message("Bunzip2 file content extracted")
+} 
+```
+### Loading data
+
+```{r load, cache=TRUE}
+library(data.table)
+system.time(noaa <- read.csv("StormData.csv", header=TRUE))
+system.time(noaa2 <- fread("StormData.csv", showProgress = FALSE))
+noaa <- noaa2
+rm(noaa2)
+```
+Due to the speed gains, this analysis will use data.table package
+
+### Quick analysis of the data
+```{r analyze1, cache=TRUE}
+dim(noaa)
+```
+
+There are 902297 observations of 37 variables. However, only 8 variables will present an interest for this analysis : State, Event type (EVTYPE), # of Fatalities (FATALITIES), # of Injuries (INJURIES), Property damages (PROPDMG), Property damage exponent (PROPDMGEXP), Crop damages (CROPDMG) and Crop damages exponent (CROPDMGEXP).
+
+### Data processing
+```{r clean1, cache=TRUE}
+noaa <- noaa[,.(STATE, EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)]
+head(noaa)
+str(noaa)
+sum(is.na(noaa))
+unique(noaa$PROPDMGEXP)
+unique(noaa$CROPDMGEXP)
+head(unique(noaa$EVTYPE),60)
+```
+No missing data, however data about exponent is encoded, and no usable as such.
+`EVTYPE` also requires some cleanup (presence of summary lines, etc...)
+
+#### EXPonent Cleaning approach : 
+
+* Find all the possible values for EXP columns
+* create a mapping table, giving the numeric power value matching each EXP symbol.
+* Invalid exponent values are translated into 0
+A matching table `expTable` will be built accordingly.
+```{r cleanexp, cache=TRUE}
+symbols <- unique(c(unique(noaa$PROPDMGEXP), unique(noaa$CROPDMGEXP)))
+#"K" "M" ""  "B" "m" "+" "0" "5" "6" "?" "4" "2" "3" "h" "7" "H" "-" "1" "8" "k"
+# The list of symbols below has been rearranged manually, to ease maintenance
+symbols <- c("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "h", "H", "k", "K", "m", "M", "b", "B","", "+", "-", "?")
+expValue <- c(seq(0,9),2,2,3,3,6,6,9,9,0,0,0,0)
+expTable <- data.frame(symbols, expValue)
+```
+
+Two new columns have been created :
+
+* `PROPDMGVALUE` : contains the USD value of Property damages
+* `CROPDMGVALUE` : contains the USD value of Crop damages
+
+Both columns have been created according to the formula :
+
+    xxxDMG * 10 ^ xxxEXP
+
+where the `xxx` is PROP|CROP, and where `xxxEXP` is the translated exponent value found in the matching table built above.
+
+```{r cleanexp2, cache=TRUE, results="hide"}
+noaa[, PROPDMGVALUE := PROPDMG * 10 ^ expTable[match(PROPDMGEXP, expTable$symbols),2]]
+noaa[, CROPDMGVALUE := CROPDMG * 10 ^ expTable[match(CROPDMGEXP, expTable$symbols),2]]
+```
+
+#### EVTYPE cleaning approach
+
+* Put all event type in uppercase
+* Trim leading / trailing spaces
+* Remove all lines containing `SUMMARY` which are likely polluting the results
+* Cleaning some abbreviations / mispelling
+* Grouping some elements into one single category
+
+
+```{r cleanevt, cache=TRUE, results="hide"}
+library(stringr)
+noaa[, EVTYPE:=toupper(EVTYPE)]
+noaa[, EVTYPE:=trimws(EVTYPE)]
+noaa <- noaa[!(EVTYPE %like% "SUMMARY")]
+noaa[EVTYPE %like% "TSTM WIND", EVTYPE := "THUNDERSTORM WINDS"]
+noaa[EVTYPE %like% "THUNDERSTORM", EVTYPE := "THUNDERSTORM WINDS"]
+noaa[EVTYPE %like% "TORNADO", EVTYPE := "TORNADO"]
+noaa[EVTYPE %like% "FLOOD", EVTYPE := "FLOOD"]
+```
+
+We now have a clean dataset to start this analysis.
+
+## Results
+### Effects of climate events on US population health
+Two types of healths harm are present in the dataset : fatalities and injuries. They will thus be analyzed separately. 
+
+A `fatalities` data.table is created by summing all fatalities numbers grouped by event type. The dataframe is then reordered in descending order of total fatalities.
+```{r fatalities, cache=TRUE}
+library(ggplot2)
+fatalities <- noaa[, .(FATALITIES=sum(FATALITIES)), by=EVTYPE]
+fatalities <- fatalities[order(-FATALITIES)]
+fatalities <- transform(fatalities, EVTYPE=reorder(EVTYPE, -FATALITIES))
+g <- ggplot(fatalities[1:20], aes(EVTYPE,FATALITIES))
+g + geom_bar(stat="identity", aes(fill=FATALITIES)) +
+    theme_light() +
+    theme(axis.text.x= element_text(angle=90, vjust=0.5, size=8)) +
+    xlab("Type of events") +
+    ylab("Total number of fatalities") +
+    ggtitle("Total number of fatalities in the US between 1950 and 2011 by type of climate event \n (Top 20 events)")
+```
+
+**We can see the top 3 main causes for casulaties are tornadoes, excessive heat and floods. Tornadoes are a key contributor to casulaties, being responsible for more casulaties than the next 3 type of events combined.** 
+
+Next the injuries. An `injuries` data.table is created by summing all injuries numbers grouped by event type. The dataframe is then reordered in descending order of total injuries.
+```{r injuries, cache=TRUE}
+injuries <- noaa[, .(INJURIES=sum(INJURIES)), by=EVTYPE]
+injuries <- injuries[order(-INJURIES)]
+injuries <- transform(injuries, EVTYPE=reorder(EVTYPE, -INJURIES))
+g <- ggplot(injuries[1:20], aes(EVTYPE,INJURIES))
+g + geom_bar(stat="identity", aes(fill=INJURIES)) +
+    theme_light() +
+    theme(axis.text.x= element_text(angle=90, vjust=0.5, size=8)) +
+    xlab("Type of events") +
+    ylab("Total number of injuries") +
+    ggtitle("Total number of injuries in the US between 1950 and 2011 by type of climate event \n (Top 20 events)")
+```
+
+**We can see here that the top 3 main causes for injuries are tornadoes, thunderstorm winds, and floods. Tordano is a massive contributor, causing more injuries alone that all other top 20 types combined.**
+
+### Economic effects of climate events on US population health
+There are two types of economic effects on this dataset : 
+
+* damages on properties
+* damages on crop
+
+The figure below will show the cumulated total damages for this two types.
+
+A new column `TOTALDMGVALUE` is created by summing both Properties damages value and crop damages value. The resulting data.table `economic` is then sorted in descending order of total damage value.
+
+```{r economic, cache=TRUE}
+noaa[, TOTALDMGVALUE := PROPDMGVALUE + CROPDMGVALUE]
+economic <- noaa[, .(TOTALDMGVALUE=sum(TOTALDMGVALUE)), by=EVTYPE]
+economic[, TOTALDMGVALUEBN := TOTALDMGVALUE / 1e9]
+economic <- economic[order(-TOTALDMGVALUE)]
+economic <- transform(economic, EVTYPE=reorder(EVTYPE, -TOTALDMGVALUE))
+g <- ggplot(economic[1:20], aes(EVTYPE,TOTALDMGVALUEBN))
+g + geom_bar(stat="identity", aes(fill=TOTALDMGVALUEBN)) +
+    theme_light() +
+    theme(axis.text.x= element_text(angle=90, vjust=0.5, size=8)) +
+    xlab("Type of events") +
+    ylab("Total economic damage in $Bn") +
+    labs(fill="Economic damages value") +
+    ggtitle("Total economic damage in the US between 1950 and 2011 \n by type of climate event (Top 20 events)")
+```
+
+**This time we can see that tornadoes are only the 3rd major contributor in terms of economic damages, behind floods and hurricanes**.
+
+**A strategy aiming at reducing health hazard of natural events would thus need to focus on tornadoes / winds, heat and floods prevention measures, while a strategy aiming at reducing economic impact of such events would focus on floods, typhoon and tornadoes prevention measures.** 
